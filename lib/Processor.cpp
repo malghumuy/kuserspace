@@ -1,3 +1,4 @@
+// Malghumuy - Library: kuserspace
 #include "../include/Processor.h"
 #include <fstream>
 #include <sstream>
@@ -41,12 +42,12 @@ public:
             }
 
             std::smatch matches;
-            if (std::regex_match(line, matches, std::regex("processor\\s+:\\s+(\\d+)"))) {
+            if (std::regex_match(line, matches, std::regex("processor\s+:\s+(\d+)"))) {
                 currentCore = std::stoi(matches[1]);
                 cores[currentCore] = CoreInfo{};
                 cores[currentCore].id = currentCore;
             }
-            else if (std::regex_match(line, matches, std::regex("physical id\\s+:\\s+(\\d+)"))) {
+            else if (std::regex_match(line, matches, std::regex("physical id\s+:\s+(\d+)"))) {
                 currentPackage = std::stoi(matches[1]);
                 if (packages.find(currentPackage) == packages.end()) {
                     packages[currentPackage] = PackageInfo{};
@@ -55,11 +56,11 @@ public:
                 cores[currentCore].physicalId = currentPackage;
                 packages[currentPackage].coreIds.push_back(currentCore);
             }
-            else if (std::regex_match(line, matches, std::regex("model name\\s+:\\s+(.+)"))) {
+            else if (std::regex_match(line, matches, std::regex("model name\s+:\s+(.+)"))) {
                 cores[currentCore].modelName = matches[1];
                 packages[currentPackage].model = matches[1];
             }
-            else if (std::regex_match(line, matches, std::regex("vendor_id\\s+:\\s+(.+)"))) {
+            else if (std::regex_match(line, matches, std::regex("vendor_id\s+:\s+(.+)"))) {
                 std::string vendor = matches[1];
                 if (vendor.find("Intel") != std::string::npos) {
                     packages[currentPackage].vendor = Vendor::Intel;

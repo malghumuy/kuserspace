@@ -1,3 +1,4 @@
+// Malghumuy - Library: kuserspace
 #include "../include/Memory.h"
 #include "../include/Buffer.h"
 #include <thread>
@@ -194,7 +195,7 @@ void Memory::readMemoryZones() {
     while (std::getline(stream, line)) {
         if (line.find("Node") != std::string::npos && line.find("zone") != std::string::npos) {
             currentZone = line.substr(line.find("zone") + 5);
-            currentZone = currentZone.substr(0, currentZone.find_first_of(" \t"));
+            currentZone = currentZone.substr(0, currentZone.find_first_of(" 	"));
             currentState.zones[currentZone] = State::ZoneInfo();
         }
         else if (!currentZone.empty()) {

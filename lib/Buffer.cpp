@@ -1,3 +1,4 @@
+// Malghumuy - Library: kuserspace
 #include "../include/Buffer.h"
 #include <fstream>
 #include <sstream>
