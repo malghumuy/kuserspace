@@ -8,22 +8,64 @@
 #include <optional>
 #include <functional>
 #include <iterator>
+#include <vector>
 
 namespace kuserspace {
 
+// Custom allocator for List nodes to reduce allocation overhead
 template<typename T>
-class List {
+class NodeAllocator {
 public:
-    // Node structure
+    // Pre-allocate a pool of nodes for better performance
+    static constexpr size_t POOL_SIZE = 1024;
+    
     struct Node {
         T data;
         std::shared_ptr<Node> next;
-        std::weak_ptr<Node> prev;  // For doubly linked list
-        std::atomic<bool> marked{false};  // For safe deletion
+        std::weak_ptr<Node> prev;
+        std::atomic<bool> marked{false};
         
         explicit Node(const T& value) : data(value) {}
         explicit Node(T&& value) : data(std::move(value)) {}
     };
+    
+    NodeAllocator() {
+        // Pre-allocate nodes
+        nodes.reserve(POOL_SIZE);
+    }
+    
+    std::shared_ptr<Node> allocate(const T& value) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (nodes.empty()) {
+            return std::make_shared<Node>(value);
+        }
+        auto node = std::move(nodes.back());
+        nodes.pop_back();
+        node->data = value;
+        return node;
+    }
+    
+    void deallocate(std::shared_ptr<Node> node) {
+        if (!node) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (nodes.size() < POOL_SIZE) {
+            node->next = nullptr;
+            node->prev.reset();
+            node->marked = false;
+            nodes.push_back(std::move(node));
+        }
+    }
+    
+private:
+    std::vector<std::shared_ptr<Node>> nodes;
+    std::mutex mutex;
+};
+
+template<typename T>
+class List {
+public:
+    // Node structure with custom allocator
+    using Node = typename NodeAllocator<T>::Node;
 
     // Iterator class
     class Iterator {
@@ -104,7 +146,7 @@ public:
     };
 
     // Constructors
-    List() = default;
+    List() : allocator(std::make_unique<NodeAllocator<T>>()) {}
     List(const List& other);
     List(List&& other) noexcept;
     List(std::initializer_list<T> init);
@@ -114,7 +156,7 @@ public:
     List& operator=(List&& other) noexcept;
 
     // Destructor
-    ~List() = default;
+    ~List() { clear(); }
 
     // Iterators
     Iterator begin() { return Iterator(head); }
@@ -177,14 +219,19 @@ public:
     bool try_insert(Iterator pos, const T& value);
     bool try_erase(Iterator pos);
 
+    // New method
+    void initialize_empty();
+
 private:
     std::shared_ptr<Node> head;
     std::shared_ptr<Node> tail;
     std::atomic<size_t> count{0};
     
-    mutable std::shared_mutex mutex;  // For read-write locking
+    // Use a more efficient locking strategy
+    mutable std::shared_mutex mutex;
+    std::unique_ptr<NodeAllocator<T>> allocator;
     
-    // Helper functions
+    // Helper functions with improved performance
     void initialize_empty();
     void cleanup();
     std::shared_ptr<Node> create_node(const T& value);
@@ -192,6 +239,8 @@ private:
     void link_nodes(std::shared_ptr<Node> prev, std::shared_ptr<Node> next);
     void unlink_node(std::shared_ptr<Node> node);
     bool validate_node(std::shared_ptr<Node> node) const;
+    
+    // ... rest of the private helper functions ...
 };
 
 } // namespace kuserspace

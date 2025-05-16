@@ -74,24 +74,24 @@ bool List<T>::validate_node(std::shared_ptr<Node> node) const {
 
 // Constructor implementations
 template<typename T>
-List<T>::List(const List& other) {
-    std::shared_lock<std::shared_mutex> lock(other.mutex);
+List<T>::List(const List& other) : allocator(std::make_unique<NodeAllocator<T>>()) {
+    std::shared_lock<std::shared_mutex> otherLock(other.mutex);
     for (const auto& item : other) {
         push_back(item);
     }
 }
 
 template<typename T>
-List<T>::List(List&& other) noexcept {
-    std::unique_lock<std::shared_mutex> lock(other.mutex);
-    head = std::move(other.head);
-    tail = std::move(other.tail);
-    count = other.count.load();
-    other.initialize_empty();
+List<T>::List(List&& other) noexcept 
+    : head(std::move(other.head))
+    , tail(std::move(other.tail))
+    , count(other.count.load())
+    , allocator(std::move(other.allocator)) {
+    other.count = 0;
 }
 
 template<typename T>
-List<T>::List(std::initializer_list<T> init) {
+List<T>::List(std::initializer_list<T> init) : allocator(std::make_unique<NodeAllocator<T>>()) {
     for (const auto& item : init) {
         push_back(item);
     }
@@ -101,9 +101,10 @@ List<T>::List(std::initializer_list<T> init) {
 template<typename T>
 List<T>& List<T>::operator=(const List& other) {
     if (this != &other) {
-        std::unique_lock<std::shared_mutex> lock(mutex);
-        std::shared_lock<std::shared_mutex> other_lock(other.mutex);
-        cleanup();
+        std::unique_lock<std::shared_mutex> thisLock(mutex);
+        std::shared_lock<std::shared_mutex> otherLock(other.mutex);
+        
+        clear();
         for (const auto& item : other) {
             push_back(item);
         }
@@ -114,13 +115,15 @@ List<T>& List<T>::operator=(const List& other) {
 template<typename T>
 List<T>& List<T>::operator=(List&& other) noexcept {
     if (this != &other) {
-        std::unique_lock<std::shared_mutex> lock(mutex);
-        std::unique_lock<std::shared_mutex> other_lock(other.mutex);
-        cleanup();
+        std::unique_lock<std::shared_mutex> thisLock(mutex);
+        std::unique_lock<std::shared_mutex> otherLock(other.mutex);
+        
+        clear();
         head = std::move(other.head);
         tail = std::move(other.tail);
         count = other.count.load();
-        other.initialize_empty();
+        allocator = std::move(other.allocator);
+        other.count = 0;
     }
     return *this;
 }
@@ -142,28 +145,36 @@ size_t List<T>::size() const {
 template<typename T>
 T& List<T>::front() {
     std::shared_lock<std::shared_mutex> lock(mutex);
-    if (!head) throw std::runtime_error("List is empty");
+    if (!head) {
+        throw std::out_of_range("List is empty");
+    }
     return head->data;
 }
 
 template<typename T>
 const T& List<T>::front() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
-    if (!head) throw std::runtime_error("List is empty");
+    if (!head) {
+        throw std::out_of_range("List is empty");
+    }
     return head->data;
 }
 
 template<typename T>
 T& List<T>::back() {
     std::shared_lock<std::shared_mutex> lock(mutex);
-    if (!tail) throw std::runtime_error("List is empty");
+    if (!tail) {
+        throw std::out_of_range("List is empty");
+    }
     return tail->data;
 }
 
 template<typename T>
 const T& List<T>::back() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
-    if (!tail) throw std::runtime_error("List is empty");
+    if (!tail) {
+        throw std::out_of_range("List is empty");
+    }
     return tail->data;
 }
 
@@ -227,30 +238,34 @@ void List<T>::push_back(T&& value) {
 template<typename T>
 void List<T>::pop_front() {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    if (!head) throw std::runtime_error("List is empty");
-    
-    auto old_head = head;
+    if (!head) {
+        throw std::out_of_range("List is empty");
+    }
+    auto oldHead = head;
     head = head->next;
     if (head) {
         head->prev.reset();
     } else {
-        tail = nullptr;
+        tail.reset();
     }
+    unlink_node(oldHead);
     count--;
 }
 
 template<typename T>
 void List<T>::pop_back() {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    if (!tail) throw std::runtime_error("List is empty");
-    
-    auto old_tail = tail;
+    if (!tail) {
+        throw std::out_of_range("List is empty");
+    }
+    auto oldTail = tail;
     tail = tail->prev.lock();
     if (tail) {
-        tail->next = nullptr;
+        tail->next.reset();
     } else {
-        head = nullptr;
+        head.reset();
     }
+    unlink_node(oldTail);
     count--;
 }
 
@@ -315,7 +330,9 @@ typename List<T>::Iterator List<T>::insert(Iterator pos, size_t count, const T& 
 template<typename T>
 typename List<T>::Iterator List<T>::erase(Iterator pos) {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    if (!pos.current) return end();
+    if (!pos.current) {
+        return end();
+    }
     
     auto next = pos.current->next;
     unlink_node(pos.current);
@@ -336,53 +353,49 @@ typename List<T>::Iterator List<T>::erase(Iterator first, Iterator last) {
 template<typename T>
 void List<T>::clear() {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    cleanup();
+    while (head) {
+        auto next = head->next;
+        unlink_node(head);
+        head = next;
+    }
+    tail.reset();
+    count = 0;
 }
 
 // Operation implementations
 template<typename T>
 void List<T>::reverse() {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    if (!head || !head->next) return;
-    
+    std::swap(head, tail);
     auto current = head;
-    tail = head;
-    
     while (current) {
-        auto next = current->next;
-        current->next = current->prev.lock();
-        current->prev = next;
-        head = current;
-        current = next;
+        std::swap(current->next, current->prev);
+        current = current->prev.lock();
     }
 }
 
 template<typename T>
 void List<T>::sort() {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    if (!head || !head->next) return;
-    
-    std::vector<T> elements;
-    for (auto it = begin(); it != end(); ++it) {
-        elements.push_back(*it);
+    std::vector<T> temp;
+    temp.reserve(count);
+    for (const auto& item : *this) {
+        temp.push_back(item);
     }
-    
-    std::sort(elements.begin(), elements.end());
-    
-    auto current = head;
-    for (const auto& element : elements) {
-        current->data = element;
-        current = current->next;
+    std::sort(temp.begin(), temp.end());
+    clear();
+    for (const auto& item : temp) {
+        push_back(item);
     }
 }
 
 template<typename T>
 void List<T>::unique() {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    if (!head || !head->next) return;
+    if (!head) return;
     
     auto current = head;
-    while (current && current->next) {
+    while (current->next) {
         if (current->data == current->next->data) {
             auto next = current->next;
             unlink_node(next);
@@ -395,53 +408,60 @@ void List<T>::unique() {
 
 template<typename T>
 void List<T>::merge(List& other) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    std::unique_lock<std::shared_mutex> other_lock(other.mutex);
+    std::unique_lock<std::shared_mutex> thisLock(mutex);
+    std::unique_lock<std::shared_mutex> otherLock(other.mutex);
     
-    if (other.empty()) return;
+    auto thisIt = begin();
+    auto otherIt = other.begin();
     
-    if (empty()) {
-        head = other.head;
-        tail = other.tail;
-        count = other.count.load();
-    } else {
-        tail->next = other.head;
-        other.head->prev = tail;
-        tail = other.tail;
-        count += other.count.load();
+    while (otherIt != other.end()) {
+        if (thisIt == end() || *otherIt < *thisIt) {
+            insert(thisIt, *otherIt);
+            ++otherIt;
+        } else {
+            ++thisIt;
+        }
     }
     
-    other.initialize_empty();
+    other.clear();
 }
 
 template<typename T>
 void List<T>::splice(Iterator pos, List& other) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    std::unique_lock<std::shared_mutex> other_lock(other.mutex);
+    std::unique_lock<std::shared_mutex> thisLock(mutex);
+    std::unique_lock<std::shared_mutex> otherLock(other.mutex);
     
     if (other.empty()) return;
     
+    auto first = other.head;
+    auto last = other.tail;
+    
+    // Remove from other list
+    other.head = nullptr;
+    other.tail = nullptr;
+    other.count = 0;
+    
+    // Insert into this list
     if (!pos.current) {
-        merge(other);
-        return;
-    }
-    
-    auto other_head = other.head;
-    auto other_tail = other.tail;
-    
-    other.head->prev = pos.current->prev;
-    other.tail->next = pos.current;
-    
-    if (pos.current->prev.lock()) {
-        pos.current->prev.lock()->next = other.head;
+        if (tail) {
+            tail->next = first;
+            first->prev = tail;
+        } else {
+            head = first;
+        }
+        tail = last;
     } else {
-        head = other.head;
+        if (pos.current->prev.lock()) {
+            pos.current->prev.lock()->next = first;
+            first->prev = pos.current->prev;
+        } else {
+            head = first;
+        }
+        pos.current->prev = last;
+        last->next = pos.current;
     }
     
-    pos.current->prev = other.tail;
-    
-    count += other.count.load();
-    other.initialize_empty();
+    count += other.count;
 }
 
 template<typename T>
@@ -449,14 +469,12 @@ void List<T>::remove(const T& value) {
     std::unique_lock<std::shared_mutex> lock(mutex);
     auto current = head;
     while (current) {
+        auto next = current->next;
         if (current->data == value) {
-            auto next = current->next;
             unlink_node(current);
             count--;
-            current = next;
-        } else {
-            current = current->next;
         }
+        current = next;
     }
 }
 
@@ -466,14 +484,12 @@ void List<T>::remove_if(Pred pred) {
     std::unique_lock<std::shared_mutex> lock(mutex);
     auto current = head;
     while (current) {
+        auto next = current->next;
         if (pred(current->data)) {
-            auto next = current->next;
             unlink_node(current);
             count--;
-            current = next;
-        } else {
-            current = current->next;
         }
+        current = next;
     }
 }
 
@@ -506,6 +522,7 @@ typename List<T>::ConstIterator List<T>::find(const T& value) const {
 
 template<typename T>
 bool List<T>::contains(const T& value) const {
+    std::shared_lock<std::shared_mutex> lock(mutex);
     return find(value) != cend();
 }
 
@@ -531,9 +548,9 @@ bool List<T>::try_push_back(const T& value) {
 template<typename T>
 bool List<T>::try_pop_front(T& value) {
     std::unique_lock<std::shared_mutex> lock(mutex, std::try_to_lock);
-    if (!lock.owns_lock() || empty()) return false;
+    if (!lock.owns_lock() || !head) return false;
     
-    value = front();
+    value = head->data;
     pop_front();
     return true;
 }
@@ -541,9 +558,9 @@ bool List<T>::try_pop_front(T& value) {
 template<typename T>
 bool List<T>::try_pop_back(T& value) {
     std::unique_lock<std::shared_mutex> lock(mutex, std::try_to_lock);
-    if (!lock.owns_lock() || empty()) return false;
+    if (!lock.owns_lock() || !tail) return false;
     
-    value = back();
+    value = tail->data;
     pop_back();
     return true;
 }
@@ -565,5 +582,12 @@ bool List<T>::try_erase(Iterator pos) {
     erase(pos);
     return true;
 }
+
+// Explicit template instantiations for common types
+template class List<int>;
+template class List<long>;
+template class List<float>;
+template class List<double>;
+template class List<std::string>;
 
 } // namespace kuserspace 
