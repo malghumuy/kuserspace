@@ -151,7 +151,7 @@ void printProcessorInfo() {
         std::cout << "  Cores: " << package.cores << std::endl;
         std::cout << "  Threads: " << package.threads << std::endl;
         std::cout << "  Temperature: " << std::fixed << std::setprecision(1) 
-                  << package.temperature << "°C" << std::endl;
+                  << processor.getPackageTemperature(package.id) << "°C" << std::endl;
     }
     
     // Print core information
@@ -222,13 +222,13 @@ int main() {
         Memory& memory = Memory::getInstance();
         Processor& processor = Processor::getInstance();
         
-        memory.startContinuousMonitoring(memoryCallback);
-        processor.startContinuousMonitoring(cpuCallback);
+        memory.startContinuousMonitoring(memoryCallback, std::chrono::seconds(1));
+        processor.startContinuousMonitoring(cpuCallback, std::chrono::seconds(1));
         
         std::this_thread::sleep_for(std::chrono::seconds(5));
         
         memory.stopMonitoring();
-        processor.stopMonitoring();
+        processor.stopContinuousMonitoring();
         
         std::cout << "\n\nMonitoring complete!" << std::endl;
         
