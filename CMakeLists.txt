@@ -32,8 +32,12 @@ add_library(kuserspace SHARED ${SOURCES})
 # Link against required libraries
 target_link_libraries(kuserspace PRIVATE Threads::Threads)
 
+# Add driver executable
+add_executable(driver driver.cpp)
+target_link_libraries(driver PRIVATE kuserspace)
+
 # Install rules
-install(TARGETS kuserspace
+install(TARGETS kuserspace driver
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin

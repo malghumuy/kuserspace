@@ -222,8 +222,8 @@ int main() {
         Memory& memory = Memory::getInstance();
         Processor& processor = Processor::getInstance();
         
-        memory.startContinuousMonitoring(memoryCallback, std::chrono::seconds(1));
-        processor.startContinuousMonitoring(cpuCallback, std::chrono::seconds(1));
+        memory.startContinuousMonitoring(memoryCallback);
+        processor.startContinuousMonitoring(cpuCallback, std::chrono::milliseconds(1000));
         
         std::this_thread::sleep_for(std::chrono::seconds(5));
         

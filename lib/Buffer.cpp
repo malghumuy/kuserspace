@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <mutex>
+#include <shared_mutex>
 
 namespace kuserspace {
 
