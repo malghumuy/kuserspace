@@ -124,9 +124,9 @@ int main() {
         
         // Example of continuous monitoring
         std::cout << "Starting CPU monitoring for 5 seconds..." << std::endl;
-        processor.startContinuousMonitoring(monitoringCallback);
+        processor.startContinuousMonitoring(monitoringCallback, std::chrono::seconds(1));
         std::this_thread::sleep_for(std::chrono::seconds(5));
-        processor.stopMonitoring();
+        processor.stopContinuousMonitoring();
         std::cout << std::endl;
         
         // Example of asynchronous statistics

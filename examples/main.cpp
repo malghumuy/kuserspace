@@ -17,7 +17,7 @@ void print_cpu_info(const Processor& proc) {
     std::cout << "Packages: " << proc.getNumPackages() << "\n\n";
 }
 
-void monitor_cpu(const Processor& proc) {
+void monitor_cpu(Processor& proc) {
     std::cout << "Starting CPU monitoring...\n";
     
     proc.startContinuousMonitoring([](const Processor::Stats& stats) {
