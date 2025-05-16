@@ -11,12 +11,13 @@
 #include <optional>
 #include <system_error>
 #include <filesystem>
+#include <array>
 
 namespace kuserspace {
 
 class Buffer {
 public:
-    // Error codes
+    // Error codes - simplified for read-only operations
     enum class Error {
         None = 0,
         FileNotFound,
@@ -25,42 +26,35 @@ public:
         InvalidPath,
         Timeout,
         IOError,
-        InvalidOperation,
-        BufferInvalid,
         SystemError
     };
 
-    // Buffer modes
+    // Simplified modes - only what we need for reading
     enum class Mode {
         Read,
-        Write,
-        Append,
-        ReadWrite,
         Binary
     };
 
-    // Buffer policies
+    // Simplified policies - only what we need for reading
     enum class Policy {
         Default,
-        NoCache,
-        Immediate,
-        Lazy,
-        Periodic
+        NoCache
     };
 
-    // Buffer configuration
+    // Simplified configuration
     struct Config {
         size_t maxBufferSize;
         std::chrono::milliseconds refreshInterval;
         bool autoRefresh;
         Mode mode;
         Policy policy;
-        bool createIfNotExists;
-        bool truncateOnWrite;
-        std::filesystem::perms permissions;
+        
+        // Performance settings
+        size_t readAheadSize;        // Size of read-ahead buffer
+        bool useMemoryMapping;       // Use memory mapping for large files
     };
 
-    // Buffer state
+    // Simplified state
     struct State {
         std::vector<char> data;
         std::chrono::system_clock::time_point lastUpdate;
@@ -68,22 +62,22 @@ public:
         bool isValid;
         Error lastError;
         std::error_code systemError;
+        
+        // Performance-related state
+        std::array<char, 8192> readBuffer;  // Static read buffer
+        bool isMapped;                      // Whether the file is memory mapped
     };
 
     Buffer();
     explicit Buffer(const std::string& path, Mode mode = Mode::Read);
     ~Buffer();
 
-    // File operations with error handling
+    // Core read operations
     std::pair<bool, Error> read(const std::string& path);
-    std::pair<bool, Error> write(const std::string& path, const std::string& data);
-    std::pair<bool, Error> append(const std::string& path, const std::string& data);
-    std::pair<bool, Error> create(const std::string& path);
-    std::pair<bool, Error> remove(const std::string& path);
-    
-    // Buffer operations
     void refresh();
     void clear();
+    
+    // Status queries
     bool isValid() const;
     Error getLastError() const;
     std::error_code getSystemError() const;
@@ -100,9 +94,10 @@ public:
     void setAutoRefresh(bool enable);
     void setMode(Mode mode);
     void setPolicy(Policy policy);
-    void setCreateIfNotExists(bool enable);
-    void setTruncateOnWrite(bool enable);
-    void setPermissions(std::filesystem::perms perms);
+    
+    // Performance settings
+    void setReadAheadSize(size_t size);
+    void setUseMemoryMapping(bool enable);
     
     // Utility methods
     bool exists(const std::string& path) const;
@@ -110,21 +105,13 @@ public:
     std::string getCurrentPath() const;
     Mode getMode() const;
     Policy getPolicy() const;
-    std::filesystem::perms getPermissions() const;
     
     // Thread-safe operations
     std::pair<bool, Error> tryRead(const std::string& path, std::chrono::milliseconds timeout);
-    std::pair<bool, Error> tryWrite(const std::string& path, const std::string& data, std::chrono::milliseconds timeout);
-    
-    // File system operations
-    std::pair<bool, Error> copy(const std::string& source, const std::string& destination);
-    std::pair<bool, Error> move(const std::string& source, const std::string& destination);
-    std::pair<bool, Error> rename(const std::string& newPath);
     
     // Buffer state queries
     bool isOpen() const;
     bool isReadable() const;
-    bool isWritable() const;
     bool isBinary() const;
     std::chrono::system_clock::time_point getLastUpdateTime() const;
     
@@ -137,6 +124,12 @@ private:
     bool checkPermissions(const std::string& path) const;
     bool validatePath(const std::string& path) const;
     void updateLastError(Error error, const std::error_code& sysError = std::error_code());
+
+    // Performance helpers
+    bool initializeBuffers();
+    void cleanupBuffers();
+    bool mapFile(const std::string& path);
+    void unmapFile();
 
     // Member variables
     std::string currentPath;

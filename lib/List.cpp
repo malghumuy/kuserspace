@@ -369,8 +369,10 @@ void List<T>::reverse() {
     std::swap(head, tail);
     auto current = head;
     while (current) {
-        std::swap(current->next, current->prev);
-        current = current->prev.lock();
+        auto next = current->next;
+        current->next = current->prev.lock();
+        current->prev = next;
+        current = next;
     }
 }
 

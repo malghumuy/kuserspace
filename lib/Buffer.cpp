@@ -7,6 +7,11 @@
 #include <thread>
 #include <chrono>
 #include <errno.h>
+#include <system_error>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 namespace kuserspace {
 
@@ -20,8 +25,6 @@ std::string Buffer::errorToString(Buffer::Error error) {
         case Buffer::Error::InvalidPath: return "Invalid path";
         case Buffer::Error::Timeout: return "Operation timed out";
         case Buffer::Error::IOError: return "I/O error";
-        case Buffer::Error::InvalidOperation: return "Invalid operation";
-        case Buffer::Error::BufferInvalid: return "Buffer invalid";
         case Buffer::Error::SystemError: return "System error";
         default: return "Unknown error";
     }
@@ -40,25 +43,18 @@ Buffer::Error Buffer::systemErrorToError(const std::error_code& error) {
     }
 }
 
-Buffer::Buffer() 
-    : config{
-        .maxBufferSize = 1024 * 1024,  // 1MB default
-        .refreshInterval = std::chrono::milliseconds(1000),
-        .autoRefresh = false,
-        .mode = Mode::Read,
-        .policy = Policy::Default,
-        .createIfNotExists = false,
-        .truncateOnWrite = false,
-        .permissions = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write
-    },
-    state{
-        .data = {},
-        .lastUpdate = std::chrono::system_clock::now(),
-        .size = 0,
-        .isValid = false,
-        .lastError = Buffer::Error::None,
-        .systemError = std::error_code()
-    } {
+Buffer::Buffer() {
+    config.maxBufferSize = 1024 * 1024 * 1024;  // 1GB default
+    config.refreshInterval = std::chrono::seconds(1);
+    config.autoRefresh = false;
+    config.mode = Mode::Read;
+    config.policy = Policy::Default;
+    
+    // Initialize performance settings
+    config.readAheadSize = 8192;
+    config.useMemoryMapping = true;
+    
+    initializeBuffers();
 }
 
 Buffer::Buffer(const std::string& path, Mode mode) : Buffer() {
@@ -67,7 +63,53 @@ Buffer::Buffer(const std::string& path, Mode mode) : Buffer() {
 }
 
 Buffer::~Buffer() {
-    clear();
+    cleanupBuffers();
+}
+
+bool Buffer::initializeBuffers() {
+    std::unique_lock<std::shared_mutex> lock(mutex);
+    state.readBuffer.fill(0);
+    state.isMapped = false;
+    return true;
+}
+
+void Buffer::cleanupBuffers() {
+    std::unique_lock<std::shared_mutex> lock(mutex);
+    if (state.isMapped) {
+        unmapFile();
+    }
+    state.data.clear();
+    state.size = 0;
+    state.isValid = false;
+}
+
+bool Buffer::mapFile(const std::string& path) {
+    if (!config.useMemoryMapping) return false;
+    
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd == -1) return false;
+    
+    struct stat st;
+    if (fstat(fd, &st) == -1) {
+        close(fd);
+        return false;
+    }
+    
+    void* mapped = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    
+    if (mapped == MAP_FAILED) return false;
+    
+    state.data.assign(static_cast<char*>(mapped), static_cast<char*>(mapped) + st.st_size);
+    munmap(mapped, st.st_size);
+    state.isMapped = true;
+    return true;
+}
+
+void Buffer::unmapFile() {
+    if (!state.isMapped) return;
+    state.data.clear();
+    state.isMapped = false;
 }
 
 void Buffer::updateLastError(Error error, const std::error_code& sysError) {
@@ -86,7 +128,7 @@ bool Buffer::checkPermissions(const std::string& path) const {
 
 bool Buffer::validatePath(const std::string& path) const {
     try {
-        return std::filesystem::exists(path) || config.createIfNotExists;
+        return std::filesystem::exists(path);
     } catch (const std::filesystem::filesystem_error& e) {
         return false;
     }
@@ -106,6 +148,17 @@ std::pair<bool, Buffer::Error> Buffer::read(const std::string& path) {
     }
     
     try {
+        // Try memory mapping first for large files
+        if (config.useMemoryMapping && mapFile(path)) {
+            state.size = state.data.size();
+            state.isValid = true;
+            state.lastUpdate = std::chrono::system_clock::now();
+            currentPath = path;
+            updateLastError(Buffer::Error::None);
+            return {true, Buffer::Error::None};
+        }
+        
+        // Fall back to buffered I/O
         std::ifstream file(path, std::ios::binary);
         if (!file) {
             updateLastError(Buffer::Error::IOError);
@@ -122,9 +175,15 @@ std::pair<bool, Buffer::Error> Buffer::read(const std::string& path) {
             return {false, Buffer::Error::BufferOverflow};
         }
         
-        // Read file
+        // Read file using buffered I/O
         state.data.resize(fileSize);
-        file.read(state.data.data(), fileSize);
+        size_t totalRead = 0;
+        
+        while (totalRead < fileSize) {
+            size_t toRead = std::min(config.readAheadSize, fileSize - totalRead);
+            file.read(state.data.data() + totalRead, toRead);
+            totalRead += file.gcount();
+        }
         
         if (!file) {
             updateLastError(Buffer::Error::IOError);
@@ -144,138 +203,11 @@ std::pair<bool, Buffer::Error> Buffer::read(const std::string& path) {
     }
 }
 
-std::pair<bool, Buffer::Error> Buffer::write(const std::string& path, const std::string& data) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    
-    if (!validatePath(path)) {
-        updateLastError(Buffer::Error::InvalidPath);
-        return {false, Buffer::Error::InvalidPath};
-    }
-    
-    try {
-        std::ios_base::openmode mode = std::ios::binary;
-        if (config.truncateOnWrite) {
-            mode |= std::ios::trunc;
-        }
-        
-        std::ofstream file(path, mode);
-        if (!file) {
-            updateLastError(Buffer::Error::IOError);
-            return {false, Buffer::Error::IOError};
-        }
-        
-        file.write(data.data(), data.size());
-        
-        if (!file) {
-            updateLastError(Buffer::Error::IOError);
-            return {false, Buffer::Error::IOError};
-        }
-        
-        // Update buffer if this is the current file
-        if (path == currentPath) {
-            state.data.assign(data.begin(), data.end());
-            state.size = data.size();
-            state.isValid = true;
-            state.lastUpdate = std::chrono::system_clock::now();
-        }
-        
-        updateLastError(Buffer::Error::None);
-        return {true, Buffer::Error::None};
-    } catch (const std::exception& e) {
-        updateLastError(Buffer::Error::SystemError);
-        return {false, Buffer::Error::SystemError};
-    }
-}
-
-std::pair<bool, Buffer::Error> Buffer::append(const std::string& path, const std::string& data) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    
-    if (!validatePath(path)) {
-        updateLastError(Buffer::Error::InvalidPath);
-        return {false, Buffer::Error::InvalidPath};
-    }
-    
-    try {
-        std::ofstream file(path, std::ios::binary | std::ios::app);
-        if (!file) {
-            updateLastError(Buffer::Error::IOError);
-            return {false, Buffer::Error::IOError};
-        }
-        
-        file.write(data.data(), data.size());
-        
-        if (!file) {
-            updateLastError(Buffer::Error::IOError);
-            return {false, Buffer::Error::IOError};
-        }
-        
-        // Update buffer if this is the current file
-        if (path == currentPath) {
-            state.data.insert(state.data.end(), data.begin(), data.end());
-            state.size += data.size();
-            state.lastUpdate = std::chrono::system_clock::now();
-        }
-        
-        updateLastError(Buffer::Error::None);
-        return {true, Buffer::Error::None};
-    } catch (const std::exception& e) {
-        updateLastError(Buffer::Error::SystemError);
-        return {false, Buffer::Error::SystemError};
-    }
-}
-
-std::pair<bool, Buffer::Error> Buffer::create(const std::string& path) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    
-    try {
-        if (std::filesystem::exists(path)) {
-            updateLastError(Buffer::Error::InvalidOperation);
-            return {false, Buffer::Error::InvalidOperation};
-        }
-        
-        std::ofstream file(path);
-        if (!file) {
-            updateLastError(Buffer::Error::IOError);
-            return {false, Buffer::Error::IOError};
-        }
-        
-        std::filesystem::permissions(path, config.permissions);
-        updateLastError(Buffer::Error::None);
-        return {true, Buffer::Error::None};
-    } catch (const std::exception& e) {
-        updateLastError(Buffer::Error::SystemError);
-        return {false, Buffer::Error::SystemError};
-    }
-}
-
-std::pair<bool, Buffer::Error> Buffer::remove(const std::string& path) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    
-    try {
-        if (!std::filesystem::exists(path)) {
-            updateLastError(Buffer::Error::FileNotFound);
-            return {false, Buffer::Error::FileNotFound};
-        }
-        
-        std::filesystem::remove(path);
-        
-        if (path == currentPath) {
-            clear();
-        }
-        
-        updateLastError(Buffer::Error::None);
-        return {true, Buffer::Error::None};
-    } catch (const std::exception& e) {
-        updateLastError(Buffer::Error::SystemError);
-        return {false, Buffer::Error::SystemError};
-    }
-}
-
 void Buffer::refresh() {
     std::unique_lock<std::shared_mutex> lock(mutex);
     
     if (currentPath.empty()) {
-        updateLastError(Buffer::Error::InvalidOperation);
+        updateLastError(Buffer::Error::InvalidPath);
         return;
     }
     
@@ -370,19 +302,14 @@ void Buffer::setPolicy(Policy policy) {
     config.policy = policy;
 }
 
-void Buffer::setCreateIfNotExists(bool enable) {
+void Buffer::setReadAheadSize(size_t size) {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    config.createIfNotExists = enable;
+    config.readAheadSize = size;
 }
 
-void Buffer::setTruncateOnWrite(bool enable) {
+void Buffer::setUseMemoryMapping(bool enable) {
     std::unique_lock<std::shared_mutex> lock(mutex);
-    config.truncateOnWrite = enable;
-}
-
-void Buffer::setPermissions(std::filesystem::perms perms) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    config.permissions = perms;
+    config.useMemoryMapping = enable;
 }
 
 bool Buffer::exists(const std::string& path) const {
@@ -409,11 +336,6 @@ Buffer::Policy Buffer::getPolicy() const {
     return config.policy;
 }
 
-std::filesystem::perms Buffer::getPermissions() const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
-    return config.permissions;
-}
-
 std::pair<bool, Buffer::Error> Buffer::tryRead(const std::string& path, std::chrono::milliseconds timeout) {
     auto start = std::chrono::steady_clock::now();
     while (true) {
@@ -430,60 +352,6 @@ std::pair<bool, Buffer::Error> Buffer::tryRead(const std::string& path, std::chr
     }
 }
 
-std::pair<bool, Buffer::Error> Buffer::tryWrite(const std::string& path, const std::string& data, std::chrono::milliseconds timeout) {
-    auto start = std::chrono::steady_clock::now();
-    while (true) {
-        auto result = write(path, data);
-        if (result.first || result.second != Buffer::Error::PermissionDenied) {
-            return result;
-        }
-        
-        if (std::chrono::steady_clock::now() - start > timeout) {
-            return {false, Buffer::Error::Timeout};
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-}
-
-std::pair<bool, Buffer::Error> Buffer::copy(const std::string& source, const std::string& destination) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    
-    try {
-        std::filesystem::copy_file(source, destination);
-        updateLastError(Buffer::Error::None);
-        return {true, Buffer::Error::None};
-    } catch (const std::filesystem::filesystem_error& e) {
-        updateLastError(Buffer::Error::SystemError, e.code());
-        return {false, Buffer::Error::SystemError};
-    }
-}
-
-std::pair<bool, Buffer::Error> Buffer::move(const std::string& source, const std::string& destination) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
-    
-    try {
-        std::filesystem::rename(source, destination);
-        if (source == currentPath) {
-            currentPath = destination;
-        }
-        updateLastError(Buffer::Error::None);
-        return {true, Buffer::Error::None};
-    } catch (const std::filesystem::filesystem_error& e) {
-        updateLastError(Buffer::Error::SystemError, e.code());
-        return {false, Buffer::Error::SystemError};
-    }
-}
-
-std::pair<bool, Buffer::Error> Buffer::rename(const std::string& newPath) {
-    if (currentPath.empty()) {
-        updateLastError(Buffer::Error::InvalidOperation);
-        return {false, Buffer::Error::InvalidOperation};
-    }
-    
-    return move(currentPath, newPath);
-}
-
 bool Buffer::isOpen() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
     return !currentPath.empty();
@@ -491,12 +359,7 @@ bool Buffer::isOpen() const {
 
 bool Buffer::isReadable() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
-    return config.mode == Mode::Read || config.mode == Mode::ReadWrite;
-}
-
-bool Buffer::isWritable() const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
-    return config.mode == Mode::Write || config.mode == Mode::ReadWrite || config.mode == Mode::Append;
+    return true;  // Always readable in read-only mode
 }
 
 bool Buffer::isBinary() const {

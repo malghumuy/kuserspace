@@ -9,6 +9,7 @@
 #include <functional>
 #include <iterator>
 #include <vector>
+#include <algorithm>
 
 namespace kuserspace {
 
@@ -232,7 +233,6 @@ private:
     std::unique_ptr<NodeAllocator<T>> allocator;
     
     // Helper functions with improved performance
-    void initialize_empty();
     void cleanup();
     std::shared_ptr<Node> create_node(const T& value);
     std::shared_ptr<Node> create_node(T&& value);
