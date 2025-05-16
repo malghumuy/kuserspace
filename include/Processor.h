@@ -4,28 +4,17 @@
 #include <string>
 #include <vector>
 #include <map>
-#include <chrono>
-#include <future>
+#include <memory>
 #include <functional>
+#include <chrono>
 #include <shared_mutex>
-#include <optional>
+#include <future>
 
 namespace kuserspace {
 
 class Processor {
 public:
-    // CPU Architecture types
-    enum class Architecture {
-        X86_64,
-        ARM64,
-        ARM,
-        PPC64,
-        S390X,
-        RISC_V,
-        Unknown
-    };
-
-    // CPU Vendor types
+    // Types and enums
     enum class Vendor {
         Intel,
         AMD,
@@ -34,16 +23,21 @@ public:
         Unknown
     };
 
-    // CPU Cache types
-    enum class CacheType {
-        L1I,    // L1 Instruction
-        L1D,    // L1 Data
-        L2,     // L2 Unified
-        L3,     // L3 Unified
-        L4      // L4 Unified (if available)
+    enum class Architecture {
+        x86,
+        x86_64,
+        ARM,
+        ARM64,
+        Unknown
     };
 
-    // CPU Frequency scaling governors
+    enum class CacheType {
+        L1D,
+        L1I,
+        L2,
+        L3
+    };
+
     enum class Governor {
         Performance,
         Powersave,
@@ -54,78 +48,68 @@ public:
         Unknown
     };
 
-    // CPU Thermal state
     enum class ThermalState {
         Normal,
         Warning,
         Critical,
-        Emergency,
         Unknown
     };
 
-    // Cache information structure
+    // Information structures
     struct CacheInfo {
-        size_t size;           // Size in bytes
-        size_t lineSize;       // Cache line size
-        size_t associativity;  // Cache associativity
-        size_t sets;           // Number of sets
-        bool shared;           // Whether cache is shared between cores
-        std::vector<int> sharedCores;  // Cores sharing this cache
+        size_t size;
+        size_t lineSize;
+        size_t associativity;
+        size_t sets;
+        bool shared;
+        std::vector<int> sharedCores;
     };
 
-    // Core information structure
     struct CoreInfo {
-        int id;                     // Core ID
-        bool online;                // Whether core is online
-        int physicalId;            // Physical package ID
-        int coreId;                // Core ID within package
-        int threadId;              // Thread ID within core
-        std::string modelName;     // CPU model name
-        uint64_t maxFreq;          // Maximum frequency in Hz
-        uint64_t minFreq;          // Minimum frequency in Hz
-        uint64_t currentFreq;      // Current frequency in Hz
-        Governor currentGovernor;  // Current frequency governor
-        float temperature;         // Temperature in Celsius
-        ThermalState thermalState; // Current thermal state
-        float utilization;         // CPU utilization percentage
-        std::map<CacheType, CacheInfo> caches;  // Cache information
+        int id;
+        int physicalId;
+        std::string modelName;
+        bool online;
+        uint64_t currentFreq;
+        uint64_t minFreq;
+        uint64_t maxFreq;
+        Governor currentGovernor;
+        std::map<CacheType, CacheInfo> caches;
+        float temperature;
+        float utilization;
     };
 
-    // Package (CPU socket) information
     struct PackageInfo {
-        int id;                     // Package ID
-        Vendor vendor;              // CPU vendor
-        std::string model;          // CPU model
-        Architecture architecture;  // CPU architecture
-        size_t cores;              // Number of cores
-        size_t threads;            // Number of threads
-        std::vector<int> coreIds;  // IDs of cores in this package
-        float temperature;         // Package temperature
-        ThermalState thermalState; // Package thermal state
+        int id;
+        Vendor vendor;
+        Architecture architecture;
+        std::string model;
+        int cores;
+        int threads;
+        std::vector<int> coreIds;
+        ThermalState thermalState;
     };
 
-    // System-wide CPU statistics
     struct Stats {
-        uint64_t userTime;      // Time spent in user mode
-        uint64_t niceTime;      // Time spent in user mode with low priority
-        uint64_t systemTime;    // Time spent in system mode
-        uint64_t idleTime;      // Time spent in idle task
-        uint64_t iowaitTime;    // Time spent waiting for I/O
-        uint64_t irqTime;       // Time spent servicing interrupts
-        uint64_t softirqTime;   // Time spent servicing softirqs
-        uint64_t stealTime;     // Time stolen by other operating systems
-        uint64_t guestTime;     // Time spent running a virtual CPU
-        uint64_t guestNiceTime; // Time spent running a niced guest
-        float totalUtilization; // Total CPU utilization percentage
-        std::vector<float> perCoreUtilization; // Per-core utilization
+        uint64_t userTime;
+        uint64_t niceTime;
+        uint64_t systemTime;
+        uint64_t idleTime;
+        uint64_t iowaitTime;
+        uint64_t irqTime;
+        uint64_t softirqTime;
+        uint64_t stealTime;
+        uint64_t guestTime;
+        uint64_t guestNiceTime;
+        float totalUtilization;
+        std::vector<float> perCoreUtilization;
     };
 
-    // Get singleton instance
-    static Processor& getInstance();
+    // Constructor/Destructor
+    Processor();
+    ~Processor();
 
-    // Delete copy constructor and assignment operator
-    Processor(const Processor&) = delete;
-    Processor& operator=(const Processor&) = delete;
+    static Processor& getInstance();
 
     // Basic CPU Information
     std::string getModelName() const;
@@ -161,9 +145,8 @@ public:
 
     // Continuous Monitoring
     using StatsCallback = std::function<void(const Stats&)>;
-    void startContinuousMonitoring(StatsCallback callback, 
-                                 std::chrono::milliseconds interval = std::chrono::seconds(1));
-    void stopMonitoring();
+    void startContinuousMonitoring(StatsCallback callback, std::chrono::milliseconds interval);
+    void stopContinuousMonitoring();
 
     // Thermal Management
     ThermalState getThermalState() const;
@@ -180,10 +163,14 @@ public:
     float getPowerLimit() const;
     bool setPowerLimit(float watts);
 
-private:
-    Processor();
-    ~Processor();
+    // Available settings queries
+    std::vector<Governor> getAvailableGovernors(int coreId) const;
+    std::pair<uint64_t, uint64_t> getFrequencyRange(int coreId) const;
+    bool isFrequencyScalingEnabled(int coreId) const;
+    bool isThermalMonitoringAvailable() const;
+    bool isPowerMonitoringAvailable() const;
 
+private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
 };

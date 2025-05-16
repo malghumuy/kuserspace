@@ -9,6 +9,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <future>
 
 namespace kuserspace {
 
@@ -333,11 +334,11 @@ std::vector<Processor::CoreInfo> Processor::getAllCores() const {
 }
 
 Processor::CoreInfo Processor::getCoreInfo(int coreId) const {
-    return pImpl->cores[coreId];
+    return pImpl->cores.at(coreId);
 }
 
 bool Processor::isCoreOnline(int coreId) const {
-    return pImpl->cores[coreId].online;
+    return pImpl->cores.at(coreId).online;
 }
 
 bool Processor::setCoreOnline(int coreId, bool online) {
@@ -345,7 +346,9 @@ bool Processor::setCoreOnline(int coreId, bool online) {
 }
 
 float Processor::getCoreTemperature(int coreId) const {
-    if (pImpl->thermalPaths.find(coreId) == pImpl->thermalPaths.end()) return 0.0f;
+    if (pImpl->thermalPaths.find(coreId) == pImpl->thermalPaths.end()) {
+        return 0.0f;
+    }
     std::ifstream tempFile(pImpl->thermalPaths.at(coreId) + "temp");
     float temp;
     tempFile >> temp;
@@ -353,15 +356,15 @@ float Processor::getCoreTemperature(int coreId) const {
 }
 
 float Processor::getCoreUtilization(int coreId) const {
-    return pImpl->cores[coreId].utilization;
+    return pImpl->getStats().perCoreUtilization[coreId];
 }
 
 uint64_t Processor::getCoreFrequency(int coreId) const {
-    return pImpl->cores[coreId].currentFreq;
+    return pImpl->cores.at(coreId).currentFreq;
 }
 
 Processor::Governor Processor::getCoreGovernor(int coreId) const {
-    return pImpl->cores[coreId].currentGovernor;
+    return pImpl->cores.at(coreId).currentGovernor;
 }
 
 bool Processor::setCoreGovernor(int coreId, Governor governor) {
@@ -370,7 +373,7 @@ bool Processor::setCoreGovernor(int coreId, Governor governor) {
 
 // Package Information
 std::vector<Processor::PackageInfo> Processor::getAllPackages() const {
-    std::vector<PackageInfo> result;
+    std::vector<Processor::PackageInfo> result;
     for (const auto& [id, package] : pImpl->packages) {
         result.push_back(package);
     }
@@ -378,20 +381,25 @@ std::vector<Processor::PackageInfo> Processor::getAllPackages() const {
 }
 
 Processor::PackageInfo Processor::getPackageInfo(int packageId) const {
-    return pImpl->packages[packageId];
+    return pImpl->packages.at(packageId);
 }
 
 float Processor::getPackageTemperature(int packageId) const {
-    return pImpl->packages[packageId].temperature;
+    // Package temperature is typically the highest core temperature
+    float maxTemp = 0.0f;
+    for (int coreId : pImpl->packages.at(packageId).coreIds) {
+        maxTemp = std::max(maxTemp, getCoreTemperature(coreId));
+    }
+    return maxTemp;
 }
 
 // Cache Information
 std::map<Processor::CacheType, Processor::CacheInfo> Processor::getCacheInfo(int coreId) const {
-    return pImpl->cores[coreId].caches;
+    return pImpl->cores.at(coreId).caches;
 }
 
 Processor::CacheInfo Processor::getCacheInfo(int coreId, CacheType type) const {
-    return pImpl->cores[coreId].caches[type];
+    return pImpl->cores.at(coreId).caches.at(type);
 }
 
 // System-wide Statistics
@@ -408,7 +416,7 @@ void Processor::startContinuousMonitoring(StatsCallback callback, std::chrono::m
     pImpl->startMonitoring(callback, interval);
 }
 
-void Processor::stopMonitoring() {
+void Processor::stopContinuousMonitoring() {
     pImpl->stopMonitoring();
 }
 
@@ -487,6 +495,45 @@ float Processor::getPowerLimit() const {
 
 bool Processor::setPowerLimit(float watts) {
     return pImpl->setPowerLimit(watts);
+}
+
+std::vector<Processor::Governor> Processor::getAvailableGovernors(int coreId) const {
+    std::vector<Governor> governors;
+    if (pImpl->freqPaths.find(coreId) == pImpl->freqPaths.end()) {
+        return governors;
+    }
+
+    std::ifstream governorFile(pImpl->freqPaths.at(coreId) + "scaling_available_governors");
+    std::string line;
+    std::getline(governorFile, line);
+    std::istringstream iss(line);
+    std::string governor;
+    while (std::getline(iss, governor, ' ')) {
+        if (governor == "performance") governors.push_back(Governor::Performance);
+        else if (governor == "powersave") governors.push_back(Governor::Powersave);
+        else if (governor == "userspace") governors.push_back(Governor::Userspace);
+        else if (governor == "ondemand") governors.push_back(Governor::Ondemand);
+        else if (governor == "conservative") governors.push_back(Governor::Conservative);
+        else if (governor == "schedutil") governors.push_back(Governor::Schedutil);
+    }
+    return governors;
+}
+
+std::pair<uint64_t, uint64_t> Processor::getFrequencyRange(int coreId) const {
+    const auto& core = pImpl->cores.at(coreId);
+    return {core.minFreq, core.maxFreq};
+}
+
+bool Processor::isFrequencyScalingEnabled(int coreId) const {
+    return pImpl->freqPaths.find(coreId) != pImpl->freqPaths.end();
+}
+
+bool Processor::isThermalMonitoringAvailable() const {
+    return !pImpl->thermalPaths.empty();
+}
+
+bool Processor::isPowerMonitoringAvailable() const {
+    return std::filesystem::exists("/sys/class/powercap/");
 }
 
 } // namespace kuserspace 
